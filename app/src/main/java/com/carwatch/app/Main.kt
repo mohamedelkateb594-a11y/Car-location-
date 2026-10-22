@@ -32,15 +32,18 @@ import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
-import com.google.android.gms.maps.CameraUpdateFactory
-import com.google.android.gms.maps.GoogleMap
-import com.google.android.gms.maps.MapView
-import com.google.android.gms.maps.model.BitmapDescriptorFactory
-import com.google.android.gms.maps.model.CircleOptions
-import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.MarkerOptions
+import org.osmdroid.config.Configuration
+import org.osmdroid.events.MapEventsReceiver
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.CustomZoomButtonsController
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.MapEventsOverlay
+import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Polygon
+import org.osmdroid.views.overlay.mylocation.GpsMyLocationProvider
+import org.osmdroid.views.overlay.mylocation.MyLocationNewOverlay
+import java.io.File
 
 // ---------- ألوان وأدوات رسم ----------
 private val BLUE = Color.parseColor("#1A73E8")
@@ -74,6 +77,17 @@ private fun ovalBg(color: Int): GradientDrawable {
     g.shape = GradientDrawable.OVAL
     g.setColor(color)
     return g
+}
+
+private fun dotBitmap(size: Int): Bitmap {
+    val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val c = Canvas(b)
+    val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    p.color = Color.WHITE
+    c.drawCircle(size / 2f, size / 2f, size / 2f, p)
+    p.color = BLUE
+    c.drawCircle(size / 2f, size / 2f, size / 2f - size * 0.15f, p)
+    return b
 }
 
 private fun targetBitmap(size: Int, color: Int): Bitmap {
@@ -230,7 +244,8 @@ private class RuleView(
 class MainActivity : Activity() {
 
     private lateinit var map: MapView
-    private var gmap: GoogleMap? = null
+    private lateinit var eventsOverlay: MapEventsOverlay
+    private var myLoc: MyLocationNewOverlay? = null
     private var zones: MutableList<Zone> = mutableListOf()
 
     private lateinit var statusText: TextView
@@ -254,32 +269,32 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        val cfg = Configuration.getInstance()
+        cfg.userAgentValue = packageName
+        cfg.osmdroidBasePath = File(cacheDir, "osm")
+        cfg.osmdroidTileCache = File(cacheDir, "osm/tiles")
+
         zones = ZoneStore.load(this)
 
         val root = FrameLayout(this)
         root.layoutDirection = View.LAYOUT_DIRECTION_RTL
 
-        // ----- خريطة جوجل -----
+        // ----- الخريطة -----
         map = MapView(this)
-        map.onCreate(savedInstanceState)
+        map.setTileSource(TileSourceFactory.MAPNIK)
+        map.setMultiTouchControls(true)
+        map.zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
+        map.controller.setZoom(15.0)
+        map.controller.setCenter(startPoint(true))
         root.addView(map, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        map.getMapAsync { g ->
-            gmap = g
-            g.uiSettings.isZoomControlsEnabled = false
-            g.uiSettings.isMyLocationButtonEnabled = false
-            g.uiSettings.isMapToolbarEnabled = false
-            g.moveCamera(CameraUpdateFactory.newLatLngZoom(startPoint(true), 15f))
-            g.setOnMapLongClickListener { p ->
-                if (!pickMode) openEditor(null, p)
+
+        eventsOverlay = MapEventsOverlay(object : MapEventsReceiver {
+            override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean = false
+            override fun longPressHelper(p: GeoPoint?): Boolean {
+                if (p != null && !pickMode) openEditor(null, p)
+                return true
             }
-            g.setOnMarkerClickListener { m ->
-                val id = m.tag as? String
-                zones.find { it.id == id }?.let { openEditor(it, null) }
-                true
-            }
-            ensureMyLocation()
-            refresh()
-        }
+        })
 
         // دبوس المنتصف (وضع اختيار الموقع)
         centerPin = TextView(this)
@@ -369,7 +384,7 @@ class MainActivity : Activity() {
         val area = LinearLayout(this)
         area.orientation = LinearLayout.VERTICAL
 
-        // أزرار عائمة
+        // أزرار عائمة + حقوق الخريطة
         fabRow = FrameLayout(this)
         val fabs = LinearLayout(this)
         fabs.orientation = LinearLayout.VERTICAL
@@ -395,6 +410,18 @@ class MainActivity : Activity() {
                 setMargins(dp(12), 0, 0, dp(12))
             }
         )
+        val attr = TextView(this)
+        attr.text = "© OpenStreetMap"
+        attr.textSize = 10f
+        attr.setTextColor(SUB)
+        attr.setPadding(dp(6), dp(2), dp(6), dp(2))
+        attr.background = box(Color.parseColor("#CCFFFFFF"), dp(6).toFloat())
+        fabRow.addView(
+            attr,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.RIGHT or Gravity.BOTTOM).apply {
+                setMargins(0, 0, dp(8), dp(6))
+            }
+        )
         area.addView(fabRow, mpWrap())
 
         // شريط تأكيد الموقع
@@ -403,16 +430,14 @@ class MainActivity : Activity() {
         pickBar.visibility = View.GONE
         val ok = pill("✔ تأكيد الموقع", BLUE, Color.WHITE)
         ok.setOnClickListener {
-            val c = gmap?.cameraPosition?.target
-            if (c != null) {
-                setPickMode(false)
-                openEditor(null, c)
-            }
+            val c = map.mapCenter
+            setPickMode(false)
+            openEditor(null, GeoPoint(c.latitude, c.longitude))
         }
         val cancel = pill("إلغاء", Color.WHITE, TEXT)
         cancel.setOnClickListener { setPickMode(false) }
-        pickBar.addView(ok, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2f).apply { setMargins(dp(12), 0, dp(6), dp(28)) })
-        pickBar.addView(cancel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(dp(6), 0, dp(12), dp(28)) })
+        pickBar.addView(ok, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2f).apply { setMargins(dp(12), 0, dp(6), dp(16)) })
+        pickBar.addView(cancel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(dp(6), 0, dp(12), dp(16)) })
         area.addView(pickBar, mpWrap())
 
         // الشريط السفلي (قائمة النقاط)
@@ -539,11 +564,13 @@ class MainActivity : Activity() {
 
         val actions = LinearLayout(this)
         actions.orientation = LinearLayout.HORIZONTAL
+        val w = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         actions.addView(actionBtn("عرض", BLUE) {
-            gmap?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(z.lat, z.lng), 16.5f))
+            map.controller.animateTo(GeoPoint(z.lat, z.lng))
+            map.controller.setZoom(16.5)
             expanded = false
             updateSheet()
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }, w)
         actions.addView(actionBtn("تعديل", BLUE) { openEditor(z, null) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         actions.addView(actionBtn("حذف", RED) { confirmDelete(z) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         card.addView(actions, mpWrap(dp(4)))
@@ -555,28 +582,30 @@ class MainActivity : Activity() {
     // ---------- تحديث الواجهة ----------
 
     private fun refresh() {
-        val g = gmap
-        if (g != null) {
-            g.clear()
-            zones.forEach { z ->
-                val c = LatLng(z.lat, z.lng)
-                g.addCircle(
-                    CircleOptions()
-                        .center(c)
-                        .radius(z.radius.toDouble())
-                        .strokeColor(BLUE)
-                        .strokeWidth(3f)
-                        .fillColor(Color.argb(45, 26, 115, 232))
-                )
-                val m = g.addMarker(
-                    MarkerOptions()
-                        .position(c)
-                        .title(z.name)
-                        .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE))
-                )
-                m?.tag = z.id
+        map.overlays.clear()
+        map.overlays.add(eventsOverlay)
+        zones.forEach { z ->
+            val center = GeoPoint(z.lat, z.lng)
+            val circle = Polygon(map)
+            circle.points = Polygon.pointsAsCircle(center, z.radius.toDouble())
+            circle.fillPaint.color = Color.argb(45, 26, 115, 232)
+            circle.outlinePaint.color = BLUE
+            circle.outlinePaint.strokeWidth = 3f
+            circle.infoWindow = null
+            map.overlays.add(circle)
+
+            val marker = Marker(map)
+            marker.position = center
+            marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            marker.title = z.name
+            marker.setOnMarkerClickListener { _, _ ->
+                openEditor(z, null)
+                true
             }
+            map.overlays.add(marker)
         }
+        myLoc?.let { map.overlays.add(it) }
+        map.invalidate()
         updateSheet()
         updateStatus()
         updateBanner()
@@ -598,14 +627,6 @@ class MainActivity : Activity() {
             zones.forEach { listBox.addView(zoneCard(it)) }
         }
         listScroll.visibility = if (expanded) View.VISIBLE else View.GONE
-        applyMapPadding()
-    }
-
-    /** يخلي لوجو جوجل ظاهر فوق الشريط السفلي */
-    private fun applyMapPadding() {
-        sheet.post {
-            gmap?.setPadding(0, 0, 0, if (pickMode) 0 else sheet.height)
-        }
     }
 
     private fun updateStatus() {
@@ -626,7 +647,6 @@ class MainActivity : Activity() {
         pickBar.visibility = if (on) View.VISIBLE else View.GONE
         sheet.visibility = if (on) View.GONE else View.VISIBLE
         fabRow.visibility = if (on) View.GONE else View.VISIBLE
-        if (on) gmap?.setPadding(0, 0, 0, 0) else applyMapPadding()
         if (on) toast("حرّك الخريطة لحد ما الدبوس يبقى على المكان، وبعدين اضغط تأكيد")
     }
 
@@ -637,7 +657,7 @@ class MainActivity : Activity() {
 
     // ---------- النقاط: إضافة / تعديل / حذف ----------
 
-    private fun openEditor(existing: Zone?, point: LatLng?) {
+    private fun openEditor(existing: Zone?, point: GeoPoint?) {
         val scroll = ScrollView(this)
         val content = LinearLayout(this)
         content.orientation = LinearLayout.VERTICAL
@@ -764,30 +784,27 @@ class MainActivity : Activity() {
         updateStatus()
     }
 
-    /** يفعّل النقطة الزرقا الحية المضمونة في خرائط جوجل (بدائرة الدقة) */
     @SuppressLint("MissingPermission")
     private fun ensureMyLocation() {
-        val g = gmap ?: return
         if (!has(Manifest.permission.ACCESS_FINE_LOCATION)) return
-        try {
-            g.isMyLocationEnabled = true
-        } catch (_: SecurityException) {
+        var o = myLoc
+        if (o == null) {
+            o = MyLocationNewOverlay(GpsMyLocationProvider(this), map)
+            val bmp = dotBitmap(dp(22))
+            o.setPersonIcon(bmp)
+            o.setDirectionArrow(bmp, bmp)
+            o.setPersonHotspot(bmp.width / 2f, bmp.height / 2f)
+            myLoc = o
+            map.overlays.add(o)
         }
+        if (!o.isMyLocationEnabled) o.enableMyLocation()
         if (!centeredOnce && zones.isEmpty()) {
             centeredOnce = true
-            flyToMe(false)
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun flyToMe(showError: Boolean) {
-        val g = gmap ?: return
-        val client = LocationServices.getFusedLocationProviderClient(this)
-        client.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null).addOnSuccessListener { loc ->
-            if (loc != null) {
-                g.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(loc.latitude, loc.longitude), 17f))
-            } else if (showError) {
-                toast("مش قادر أحدد موقعك، تأكد إن الـ GPS شغال")
+            val ov = o
+            ov.runOnFirstFix {
+                runOnUiThread {
+                    ov.myLocation?.let { map.controller.animateTo(it) }
+                }
             }
         }
     }
@@ -799,32 +816,40 @@ class MainActivity : Activity() {
             return
         }
         ensureMyLocation()
-        flyToMe(true)
+        val o = myLoc
+        val fix = o?.myLocation
+        if (fix != null) {
+            map.controller.setZoom(17.0)
+            map.controller.animateTo(fix)
+        } else {
+            toast("جاري تحديد موقعك... تأكد إن الـ GPS شغال")
+            o?.runOnFirstFix {
+                runOnUiThread {
+                    o.myLocation?.let {
+                        map.controller.setZoom(17.0)
+                        map.controller.animateTo(it)
+                    }
+                }
+            }
+        }
     }
 
     @SuppressLint("MissingPermission")
-    private fun startPoint(preferZones: Boolean): LatLng {
+    private fun startPoint(preferZones: Boolean): GeoPoint {
         if (preferZones) {
-            zones.firstOrNull()?.let { return LatLng(it.lat, it.lng) }
+            zones.firstOrNull()?.let { return GeoPoint(it.lat, it.lng) }
         }
         if (has(Manifest.permission.ACCESS_FINE_LOCATION)) {
             val lm = getSystemService(LocationManager::class.java)
             for (prov in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
                 try {
                     val loc = lm.getLastKnownLocation(prov)
-                    if (loc != null) return LatLng(loc.latitude, loc.longitude)
+                    if (loc != null) return GeoPoint(loc.latitude, loc.longitude)
                 } catch (_: Exception) {
                 }
             }
         }
-        return LatLng(30.0444, 31.2357)
-    }
-
-    // ---------- دورة حياة الخريطة ----------
-
-    override fun onStart() {
-        super.onStart()
-        map.onStart()
+        return GeoPoint(30.0444, 31.2357)
     }
 
     override fun onResume() {
@@ -842,28 +867,9 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
-        map.onPause()
         super.onPause()
-    }
-
-    override fun onStop() {
-        map.onStop()
-        super.onStop()
-    }
-
-    override fun onDestroy() {
-        map.onDestroy()
-        super.onDestroy()
-    }
-
-    override fun onLowMemory() {
-        super.onLowMemory()
-        map.onLowMemory()
-    }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        map.onSaveInstanceState(outState)
+        map.onPause()
+        myLoc?.disableMyLocation()
     }
 
     // ---------- الصلاحيات ----------

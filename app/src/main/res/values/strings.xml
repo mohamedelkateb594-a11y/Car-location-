@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GeoMode</string>
+    <string name="a11y_desc">يستخدم GeoMode إمكانية الوصول لإرسال رسائل واتساب وتبديل الواي فاي وبيانات الجوال ووضع الطيران تلقائيًا عند دخول أو خروج أماكن حددتها أنت داخل التطبيق فقط.</string>
+</resources>

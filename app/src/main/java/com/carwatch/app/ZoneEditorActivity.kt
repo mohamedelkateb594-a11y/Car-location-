@@ -426,6 +426,10 @@ class ZoneEditorActivity : Activity() {
                 Toast.makeText(this, "رقم الواتساب غير صحيح", Toast.LENGTH_LONG).show()
                 return null
             }
+            if (a.waNumber.isNotEmpty() && a.waText.isEmpty()) {
+                Toast.makeText(this, "اكتب نص رسالة الواتساب (من غير نص مفيش زر إرسال)", Toast.LENGTH_LONG).show()
+                return null
+            }
         }
         return Zone(
             zoneId, nm, lat, lng, radius.toFloat(), chipFav.on, swEnabled.isChecked,
@@ -443,7 +447,8 @@ class ZoneEditorActivity : Activity() {
 
     private fun test(entering: Boolean) {
         val z = collect() ?: return
-        Actuator.run(this, z, entering, true)
-        Toast.makeText(this, "تم التنفيذ (تجربة)", Toast.LENGTH_SHORT).show()
+        if (Actuator.run(this, z, entering, true)) {
+            Toast.makeText(this, "بدأ التنفيذ، استنى كام ثانية وشوف النتيجة", Toast.LENGTH_SHORT).show()
+        }
     }
 }

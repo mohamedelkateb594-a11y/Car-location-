@@ -21,6 +21,8 @@ object Jobs {
     private var current: Job? = null
     private var acted = false
     private var seen = false
+    private var lastPkg = ""
+    private var lastError = ""
 
     private val dataLabels = listOf(
         "Mobile data", "Mobile Data", "بيانات الجوال", "بيانات الهاتف المحمول",
@@ -36,6 +38,12 @@ object Jobs {
         "wifi" -> "الواي فاي"
         "data" -> "بيانات الجوال"
         else -> "وضع الطيران"
+    }
+
+    private fun err(): String {
+        val e = lastError
+        if (e.isEmpty()) return ""
+        return " (" + (if (e.length > 90) e.substring(0, 90) else e) + ")"
     }
 
     fun enqueue(ctx: Context, job: Job) {
@@ -61,11 +69,13 @@ object Jobs {
         current = j
         acted = false
         seen = false
+        lastPkg = ""
+        lastError = ""
         if (!launch(ctx, j)) {
             if (j.kind == "whatsapp") {
-                toast(ctx, "مقدرتش أفتح واتساب، اتأكد إنه متثبت")
+                toast(ctx, "مقدرتش أفتح واتساب، اتأكد إنه متثبت" + err())
             } else {
-                toast(ctx, "مقدرتش أفتح إعدادات " + title(j) + "، فعّل العرض فوق التطبيقات")
+                toast(ctx, "مقدرتش أفتح إعدادات " + title(j) + err())
             }
             current = null
             next(ctx)
@@ -76,11 +86,13 @@ object Jobs {
             if (current === j) {
                 if (seen) {
                     val what = if (j.kind == "whatsapp") "زر الإرسال" else "مفتاح التبديل"
-                    toast(ctx, "ما لقيتش " + what + " في شاشة " + title(j))
+                    toast(ctx, "ما لقيتش " + what + " في شاشة " + title(j) + " (الشاشة: " + lastPkg + ")")
                 } else {
-                    toast(ctx, "شاشة " + title(j) + " ما اتفتحتش، فعّل العرض فوق التطبيقات والنوافذ المنبثقة في الخلفية (شاومي)")
+                    val shown = if (lastPkg.isEmpty()) "ولا شاشة" else lastPkg
+                    toast(ctx, "شاشة " + title(j) + " ما اتفتحتش أو الخدمة مش شايفاها. آخر شاشة شفتها: " + shown)
                 }
-                finish(ctx)
+                // في الواتساب نسيب المحادثة مفتوحة عشان تضغط إرسال بإيدك
+                finish(ctx, j.kind != "whatsapp")
             }
         }, 25000L)
     }
@@ -96,8 +108,10 @@ object Jobs {
         }, 700L)
     }
 
-    private fun finish(ctx: Context) {
-        GeoAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+    private fun finish(ctx: Context, back: Boolean) {
+        if (back) {
+            GeoAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        }
         current = null
         next(ctx)
     }
@@ -110,31 +124,51 @@ object Jobs {
         return d
     }
 
+    private fun startFirst(ctx: Context, intents: List<Intent>): Boolean {
+        lastError = ""
+        for (i in intents) {
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            try {
+                ctx.startActivity(i)
+                return true
+            } catch (e: Exception) {
+                lastError = e.javaClass.simpleName + ": " + (e.message ?: "")
+            }
+        }
+        return false
+    }
+
     private fun launch(ctx: Context, j: Job): Boolean {
-        val intent: Intent = when (j.kind) {
-            "airplane" -> Intent(Settings.ACTION_AIRPLANE_MODE_SETTINGS)
-            "wifi" -> Intent(Settings.ACTION_WIFI_SETTINGS)
-            "data" -> if (Build.VERSION.SDK_INT >= 29) {
-                Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY)
-            } else {
-                Intent(Settings.ACTION_DATA_ROAMING_SETTINGS)
+        val list = ArrayList<Intent>()
+        when (j.kind) {
+            "airplane" -> {
+                list.add(Intent(Settings.ACTION_AIRPLANE_MODE_SETTINGS))
+                list.add(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+            }
+            "wifi" -> {
+                list.add(Intent(Settings.ACTION_WIFI_SETTINGS))
+            }
+            "data" -> {
+                if (Build.VERSION.SDK_INT >= 29) list.add(Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY))
+                list.add(Intent(Settings.ACTION_DATA_ROAMING_SETTINGS))
+                list.add(Intent(Settings.ACTION_NETWORK_OPERATOR_SETTINGS))
+                list.add(Intent(Settings.ACTION_WIRELESS_SETTINGS))
             }
             "whatsapp" -> {
                 val pkg = listOf("com.whatsapp", "com.whatsapp.w4b")
                     .firstOrNull { ctx.packageManager.getLaunchIntentForPackage(it) != null }
-                    ?: return false
-                val uri = Uri.parse("https://wa.me/" + waNumber(j.number) + "?text=" + Uri.encode(j.text))
-                Intent(Intent.ACTION_VIEW, uri).setPackage(pkg)
+                if (pkg == null) {
+                    lastError = "واتساب مش متثبت"
+                    return false
+                }
+                val phone = waNumber(j.number)
+                val text = Uri.encode(j.text)
+                list.add(Intent(Intent.ACTION_VIEW, Uri.parse("whatsapp://send?phone=" + phone + "&text=" + text)).setPackage(pkg))
+                list.add(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/" + phone + "?text=" + text)).setPackage(pkg))
             }
             else -> return false
         }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        return try {
-            ctx.startActivity(intent)
-            true
-        } catch (_: Exception) {
-            false
-        }
+        return startFirst(ctx, list)
     }
 
     fun onEvent(svc: AccessibilityService) {
@@ -142,6 +176,7 @@ object Jobs {
         if (acted) return
         val root = svc.rootInActiveWindow ?: return
         val pkg = root.packageName?.toString() ?: return
+        lastPkg = pkg
         val okPkg = if (j.kind == "whatsapp") pkg.startsWith("com.whatsapp") else pkg == "com.android.settings"
         if (!okPkg) return
         seen = true

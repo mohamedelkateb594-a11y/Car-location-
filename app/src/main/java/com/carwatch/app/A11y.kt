@@ -10,6 +10,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Toast
 
 data class Job(val kind: String, val on: Boolean, val number: String = "", val text: String = "")
 
@@ -19,16 +20,32 @@ object Jobs {
     private val queue = ArrayDeque<Job>()
     private var current: Job? = null
     private var acted = false
+    private var seen = false
 
     private val dataLabels = listOf(
         "Mobile data", "Mobile Data", "بيانات الجوال", "بيانات الهاتف المحمول",
         "بيانات الهاتف", "بيانات الجوّال", "البيانات الخلوية"
     )
 
+    private fun toast(ctx: Context, msg: String) {
+        Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+    }
+
+    private fun title(j: Job): String = when (j.kind) {
+        "whatsapp" -> "واتساب"
+        "wifi" -> "الواي فاي"
+        "data" -> "بيانات الجوال"
+        else -> "وضع الطيران"
+    }
+
     fun enqueue(ctx: Context, job: Job) {
         val appCtx = ctx.applicationContext
         handler.post {
-            if (GeoAccessibilityService.instance != null) {
+            if (job.kind == "whatsapp" && job.text.isBlank()) {
+                toast(appCtx, "اكتب نص رسالة الواتساب الأول (من غير نص مفيش زر إرسال)")
+            } else if (GeoAccessibilityService.instance == null) {
+                toast(appCtx, "خدمة إمكانية الوصول مش شغالة، فعّل GeoMode من إعدادات إمكانية الوصول")
+            } else {
                 queue.addLast(job)
                 if (current == null) next(appCtx)
             }
@@ -43,14 +60,40 @@ object Jobs {
         }
         current = j
         acted = false
+        seen = false
         if (!launch(ctx, j)) {
+            if (j.kind == "whatsapp") {
+                toast(ctx, "مقدرتش أفتح واتساب، اتأكد إنه متثبت")
+            } else {
+                toast(ctx, "مقدرتش أفتح إعدادات " + title(j) + "، فعّل العرض فوق التطبيقات")
+            }
             current = null
             next(ctx)
             return
         }
+        poll(j)
         handler.postDelayed({
-            if (current === j) finish(ctx)
-        }, 20000L)
+            if (current === j) {
+                if (seen) {
+                    val what = if (j.kind == "whatsapp") "زر الإرسال" else "مفتاح التبديل"
+                    toast(ctx, "ما لقيتش " + what + " في شاشة " + title(j))
+                } else {
+                    toast(ctx, "شاشة " + title(j) + " ما اتفتحتش، فعّل العرض فوق التطبيقات والنوافذ المنبثقة في الخلفية (شاومي)")
+                }
+                finish(ctx)
+            }
+        }, 25000L)
+    }
+
+    // فحص دوري للشاشة، لأن بعض الأجهزة مبتبعتش أحداث كفاية
+    private fun poll(j: Job) {
+        handler.postDelayed({
+            if (current === j && !acted) {
+                val svc = GeoAccessibilityService.instance
+                if (svc != null) onEvent(svc)
+                poll(j)
+            }
+        }, 700L)
     }
 
     private fun finish(ctx: Context) {
@@ -101,17 +144,23 @@ object Jobs {
         val pkg = root.packageName?.toString() ?: return
         val okPkg = if (j.kind == "whatsapp") pkg.startsWith("com.whatsapp") else pkg == "com.android.settings"
         if (!okPkg) return
+        seen = true
         if (locate(j, root) == null) return
         acted = true
         handler.postDelayed({
             val r = svc.rootInActiveWindow
             val n = if (r != null) locate(j, r) else null
-            if (n != null) {
-                if (j.kind == "whatsapp") {
-                    click(n)
-                } else if (n.isChecked != j.on) {
-                    click(n)
-                }
+            val app = svc.applicationContext
+            if (n == null) {
+                toast(app, "اختفى الزر قبل ما أضغط عليه، جرّب تاني")
+            } else if (j.kind == "whatsapp") {
+                click(n)
+                toast(app, "ضغطت إرسال في واتساب، راجع المحادثة")
+            } else if (n.isChecked != j.on) {
+                click(n)
+                toast(app, "اتغيّر: " + title(j))
+            } else {
+                toast(app, title(j) + " كان بالحالة المطلوبة")
             }
             doneLater(svc, if (j.kind == "whatsapp") 2 else 1, j)
         }, 900L)
@@ -144,10 +193,23 @@ object Jobs {
         if (byId.isNotEmpty()) return byId[0]
         val byIdBiz = root.findAccessibilityNodeInfosByViewId("com.whatsapp.w4b:id/send")
         if (byIdBiz.isNotEmpty()) return byIdBiz[0]
+        val bySuffix = findById(root, ":id/send")
+        if (bySuffix != null) return bySuffix
         for (label in listOf("Send", "إرسال")) {
             for (n in root.findAccessibilityNodeInfosByText(label)) {
                 if (n.isClickable || n.contentDescription?.toString() == label) return n
             }
+        }
+        return null
+    }
+
+    private fun findById(n: AccessibilityNodeInfo?, suffix: String): AccessibilityNodeInfo? {
+        if (n == null) return null
+        val id = n.viewIdResourceName
+        if (id != null && id.endsWith(suffix)) return n
+        for (i in 0 until n.childCount) {
+            val r = findById(n.getChild(i), suffix)
+            if (r != null) return r
         }
         return null
     }

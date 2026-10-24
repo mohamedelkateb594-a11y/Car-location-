@@ -13,7 +13,9 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.telecom.TelecomManager
+import android.widget.Toast
 import com.google.android.gms.location.Geofence
 import com.google.android.gms.location.GeofencingEvent
 import com.google.android.gms.location.GeofencingRequest
@@ -104,13 +106,32 @@ class RevertReceiver : BroadcastReceiver() {
 }
 
 object Actuator {
-    fun run(ctx: Context, zone: Zone, entering: Boolean, force: Boolean) {
-        if (!force && !zone.schedule.allows(Calendar.getInstance())) return
+    private fun needsAccessibility(a: Actions): Boolean =
+        a.wifi != 0 || a.data != 0 || a.airplane != 0 || a.waNumber.isNotEmpty()
+
+    // بترجّع true لو التنفيذ بدأ فعلًا، و false لو اتوقف (جدولة أو إمكانية وصول مقفولة)
+    fun run(ctx: Context, zone: Zone, entering: Boolean, force: Boolean): Boolean {
+        if (!force && !zone.schedule.allows(Calendar.getInstance())) return false
         val a = if (entering) zone.onEnter else zone.onExit
+        if (force && needsAccessibility(a) && GeoAccessibilityService.instance == null) {
+            Toast.makeText(
+                ctx.applicationContext,
+                "خدمة إمكانية الوصول مش شغالة. فعّل GeoMode من القايمة اللي هتفتح، وارجع جرّب تاني",
+                Toast.LENGTH_LONG
+            ).show()
+            val i = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            try {
+                ctx.startActivity(i)
+            } catch (_: Exception) {
+            }
+            return false
+        }
         execute(ctx, a, zone, if (entering) "enter" else "exit", force)
         if (zone.schedule.revertMin > 0 && a.hasToggles()) {
             scheduleRevert(ctx.applicationContext, zone.id, entering, zone.schedule.revertMin)
         }
+        return true
     }
 
     fun execute(ctx: Context, a: Actions, zone: Zone, tag: String, force: Boolean) {
